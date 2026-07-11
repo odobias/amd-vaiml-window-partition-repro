@@ -1,3 +1,7 @@
 model.onnx
 __pycache__/
 .downloads/
+build/
+third_party/
+*.obj
+*.pdb

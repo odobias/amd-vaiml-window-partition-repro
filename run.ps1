@@ -1,11 +1,12 @@
 [CmdletBinding()]
 param(
-    [string]$Python = "",
+    [string]$OrtDll = "",
     [string]$CacheDir = "",
     [switch]$Bootstrap,
-    [switch]$InstallPythonDeps,
+    [switch]$Build,
     [switch]$ReuseCache,
-    [switch]$RegenerateModel
+    [switch]$RegenerateModel,
+    [switch]$CpuOnly
 )
 
 $ErrorActionPreference = "Stop"
@@ -20,53 +21,51 @@ if ($null -ne (Get-Variable PSStyle -ErrorAction SilentlyContinue) -and $null -n
     $PSStyle.OutputRendering = "Ansi"
 }
 
-function Resolve-Python {
+function Resolve-OrtDll {
     param([string]$Requested)
     $candidates = @()
     if ($Requested) { $candidates += $Requested }
-    if ($env:RYZEN_AI_PYTHON) { $candidates += $env:RYZEN_AI_PYTHON }
-    $candidates += "C:\ProgramData\miniforge3\envs\ryzen-ai-1.8.0-beta\python.exe"
-    $cmd = Get-Command python -ErrorAction SilentlyContinue
-    if ($cmd) { $candidates += $cmd.Source }
+    if ($env:ORT_DLL) { $candidates += $env:ORT_DLL }
+    $candidates += "C:\ProgramData\miniforge3\envs\ryzen-ai-1.8.0-beta\Lib\site-packages\onnxruntime\capi\onnxruntime.dll"
+    $candidates += "C:\Program Files\WindowsApps\WindowsWorkload.WinMLShared.5.0_1.2605.851.0_x64__8wekyb3d8bbwe\onnxruntime.dll"
 
     foreach ($candidate in $candidates) {
         if ($candidate -and (Test-Path $candidate)) { return (Resolve-Path $candidate).Path }
     }
-    throw "No Python found. Pass -Python <path-to-Ryzen-AI-python.exe> or set RYZEN_AI_PYTHON."
+    throw "No ONNX Runtime DLL found. Pass -OrtDll or set ORT_DLL."
 }
 
 if ($Bootstrap) {
-    $bootstrapScript = Join-Path $PSScriptRoot "bootstrap.ps1"
     $bootstrapArgs = @()
-    if ($Python) { $bootstrapArgs += @("-Python", $Python) }
-    if ($InstallPythonDeps) { $bootstrapArgs += "-InstallPythonDeps" }
-    & $bootstrapScript @bootstrapArgs
+    if ($OrtDll) { $bootstrapArgs += @("-OrtDll", $OrtDll) }
+    & (Join-Path $PSScriptRoot "bootstrap.ps1") @bootstrapArgs
     if ($LASTEXITCODE -ne 0) { throw "bootstrap failed with exit code $LASTEXITCODE" }
 }
 
-$pythonExe = Resolve-Python $Python
-$script = Join-Path $PSScriptRoot "repro.py"
-$model = Join-Path $PSScriptRoot "model.onnx"
-
-Write-Host "Python : $pythonExe"
-Write-Host "Script : $script"
-Write-Host "Model  : $model (generated locally; not shipped)"
-
-$common = @($script)
-if ($RegenerateModel -or -not (Test-Path $model)) { $common += "--regenerate-model" }
-if ($CacheDir) { $common += @("--cache-dir", $CacheDir) }
-
-Write-Host "`n=== CPU control (expected: exit 0, finite [64,64,96]) ==="
-& $pythonExe @common cpu
-if ($LASTEXITCODE -ne 0) {
-    throw "CPU control failed with exit code $LASTEXITCODE"
+$exe = Join-Path $PSScriptRoot "build\Release\amd_vaiml_repro.exe"
+if ($Build -or -not (Test-Path $exe)) {
+    $buildArgs = @()
+    if ($Bootstrap) { $buildArgs += "-Bootstrap" }
+    & (Join-Path $PSScriptRoot "build.ps1") @buildArgs
+    if ($LASTEXITCODE -ne 0) { throw "build failed with exit code $LASTEXITCODE" }
 }
 
-Write-Host "`n=== VitisAI (expected on affected runtime: session succeeds, first inference crashes with 0xC0000005) ==="
-$arguments = @($common + "vitisai")
-if ($ReuseCache) { $arguments += "--reuse-cache" }
-& $pythonExe @arguments
+$ortDllPath = Resolve-OrtDll $OrtDll
+$model = Join-Path $PSScriptRoot "model.onnx"
+if (-not $CacheDir) { $CacheDir = Join-Path ([IO.Path]::GetTempPath()) "amd-vaiml-window-partition-cpp-cache" }
+
+Write-Host "Exe    : $exe"
+Write-Host "ORT DLL: $ortDllPath"
+Write-Host "Model  : $model (generated locally; not shipped)"
+
+$arguments = @("--ort-dll", $ortDllPath, "--model", $model)
+$arguments += @("--cache-dir", $CacheDir)
+if ($RegenerateModel -or -not (Test-Path $model)) { $arguments += "--regenerate-model" }
+if ($CpuOnly) { $arguments += "--cpu-only" }
+if (-not $ReuseCache -and (Test-Path $CacheDir)) { Remove-Item $CacheDir -Recurse -Force }
+
+& $exe @arguments
 $code = $LASTEXITCODE
 $unsigned = [BitConverter]::ToUInt32([BitConverter]::GetBytes([int]$code), 0)
-Write-Host ("VitisAI process exit code: {0} (0x{1:X8})" -f $code, $unsigned)
+Write-Host ("repro exit code: {0} (0x{1:X8})" -f $code, $unsigned)
 exit $code

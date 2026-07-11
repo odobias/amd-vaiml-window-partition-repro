@@ -1,7 +1,7 @@
 [CmdletBinding()]
 param(
-    [string]$Python = "",
-    [switch]$InstallPythonDeps,
+    [string]$OrtIncludeDir = "",
+    [string]$OrtDll = "",
     [switch]$DownloadRyzenAI,
     [string]$DownloadDir = "",
     [switch]$AcceptAmdDownloadTerms
@@ -30,14 +30,27 @@ $npuDriver = @{
     Sha256 = "D09695C5833A2263A0A77484FA145013D9A570C0110CFBFA65CC2DD31899F7CF"
 }
 
-function Resolve-ReproPython {
+function Resolve-OrtDll {
     param([string]$Requested)
     $candidates = @()
     if ($Requested) { $candidates += $Requested }
-    if ($env:RYZEN_AI_PYTHON) { $candidates += $env:RYZEN_AI_PYTHON }
-    $candidates += "C:\ProgramData\miniforge3\envs\ryzen-ai-1.8.0-beta\python.exe"
-    $cmd = Get-Command python -ErrorAction SilentlyContinue
-    if ($cmd) { $candidates += $cmd.Source }
+    if ($env:ORT_DLL) { $candidates += $env:ORT_DLL }
+    $candidates += "C:\ProgramData\miniforge3\envs\ryzen-ai-1.8.0-beta\Lib\site-packages\onnxruntime\capi\onnxruntime.dll"
+    $candidates += "C:\Program Files\WindowsApps\WindowsWorkload.WinMLShared.5.0_1.2605.851.0_x64__8wekyb3d8bbwe\onnxruntime.dll"
+
+    foreach ($candidate in $candidates) {
+        if ($candidate -and (Test-Path $candidate)) { return (Resolve-Path $candidate).Path }
+    }
+    return ""
+}
+
+function Resolve-OrtHeader {
+    param([string]$Requested, [string]$Name)
+    $candidates = @()
+    if ($Requested) { $candidates += (Join-Path $Requested $Name) }
+    if ($env:ORT_INCLUDE_DIR) { $candidates += (Join-Path $env:ORT_INCLUDE_DIR $Name) }
+    $candidates += (Join-Path $PSScriptRoot "third_party\onnxruntime\include\$Name")
+    $candidates += "C:\Projects\upstream\onnxruntime\include\onnxruntime\core\session\$Name"
 
     foreach ($candidate in $candidates) {
         if ($candidate -and (Test-Path $candidate)) { return (Resolve-Path $candidate).Path }
@@ -82,53 +95,36 @@ if ($DownloadRyzenAI) {
     Write-Host "This script does not silently launch vendor installers; they may require admin rights and license prompts."
 }
 
-$pythonExe = Resolve-ReproPython $Python
-if (-not $pythonExe) {
-    throw "No Python found. Install Ryzen AI SDK, pass -Python <path>, set RYZEN_AI_PYTHON, or use -DownloadRyzenAI -AcceptAmdDownloadTerms."
+$ortDllPath = Resolve-OrtDll $OrtDll
+if (-not $ortDllPath) {
+    throw "No ONNX Runtime DLL found. Install Ryzen AI SDK, set ORT_DLL, pass -OrtDll, or use -DownloadRyzenAI -AcceptAmdDownloadTerms."
 }
 
-Write-Host "Python: $pythonExe"
-$requirements = Join-Path $PSScriptRoot "requirements.txt"
-if ($InstallPythonDeps) {
-    Write-Host "Installing Python graph-generation dependencies from $requirements ..."
-    & $pythonExe -m pip install --upgrade -r $requirements
-    if ($LASTEXITCODE -ne 0) { throw "pip install failed with exit code $LASTEXITCODE" }
+if (-not $OrtIncludeDir) { $OrtIncludeDir = Join-Path $PSScriptRoot "third_party\onnxruntime\include" }
+New-Item -ItemType Directory -Path $OrtIncludeDir -Force | Out-Null
+foreach ($name in @("onnxruntime_c_api.h", "onnxruntime_ep_c_api.h")) {
+    $header = Resolve-OrtHeader $OrtIncludeDir $name
+    $localHeader = Join-Path $OrtIncludeDir $name
+    if (-not $header) {
+        $url = "https://raw.githubusercontent.com/microsoft/onnxruntime/main/include/onnxruntime/core/session/$name"
+        Write-Host "Downloading $name ..." -ForegroundColor Cyan
+        Invoke-WebRequest -Uri $url -OutFile $localHeader
+        $header = $localHeader
+    } else {
+        if ((Resolve-Path $header).Path -ne (Resolve-Path $localHeader -ErrorAction SilentlyContinue).Path) {
+            Copy-Item $header $localHeader -Force
+            $header = $localHeader
+        }
+    }
 }
 
-$probe = @"
-import importlib.util
-import json
-import sys
-
-mods = ["numpy", "onnx", "onnxruntime"]
-missing = [m for m in mods if importlib.util.find_spec(m) is None]
-if missing:
-    print(json.dumps({"missing": missing}))
-    sys.exit(2)
-
-import onnxruntime as ort
-providers = ort.get_available_providers()
-print(json.dumps({"python": sys.executable, "onnxruntime": ort.__version__, "providers": providers}, indent=2))
-if "VitisAIExecutionProvider" not in providers:
-    sys.exit(3)
-"@
-$tmp = Join-Path ([IO.Path]::GetTempPath()) ("amd-vaiml-repro-probe-" + [Guid]::NewGuid().ToString("N") + ".py")
-[IO.File]::WriteAllText($tmp, $probe, $utf8)
-try {
-    & $pythonExe $tmp
-    $code = $LASTEXITCODE
-} finally {
-    Remove-Item $tmp -Force -ErrorAction SilentlyContinue
+$header = Join-Path $OrtIncludeDir "onnxruntime_c_api.h"
+if (Test-Path $header) {
+    New-Item -ItemType Directory -Path $OrtIncludeDir -Force | Out-Null
+} else {
+    throw "onnxruntime_c_api.h was not created."
 }
 
-if ($code -eq 2) {
-    throw "Python dependencies are missing. Re-run with -InstallPythonDeps, using the Ryzen AI SDK Python."
-}
-if ($code -eq 3) {
-    throw "VitisAIExecutionProvider is not available. Do not install vanilla pip onnxruntime; use the Ryzen AI SDK Python/runtime."
-}
-if ($code -ne 0) {
-    throw "Provider probe failed with exit code $code"
-}
-
-Write-Host "Bootstrap validation passed." -ForegroundColor Green
+Write-Host "ONNX Runtime DLL   : $ortDllPath"
+Write-Host "ONNX Runtime header: $header"
+Write-Host "Bootstrap validation passed. Build with .\build.ps1, run with .\run.ps1." -ForegroundColor Green
