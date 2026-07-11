@@ -11,19 +11,28 @@ on the first `Run()`.
 
 ## What ships
 
-This directory is intentionally source-only:
+This directory is intentionally source-only. The native C++ runner is the primary
+vendor-facing repro; the Python runner is included as a parity path and easier
+graph-inspection aid.
 
 - `bootstrap.ps1` - validates the ONNX Runtime / Ryzen AI runtime paths, fetches
   the ONNX Runtime C API header if needed, and can download AMD SDK/driver installers.
 - `build.ps1` - builds the C++ repro with CMake or plain Visual Studio `cl.exe`.
-- `run.ps1` - portable Windows runner for a new machine.
+- `run.ps1` - portable native C++ runner for a new machine.
+- `run-python.ps1` - optional Python runner using the same synthetic graph.
 - `src/main.cpp` - writes the minimal ONNX protobuf, runs CPU control, then runs VitisAI.
+- `repro.py` - Python version of the repro using `onnx` helper APIs.
+- `requirements.txt` - Python packages needed by `repro.py` (`numpy`, `onnx`).
 - `.gitignore` - ignores generated model/build/download artifacts.
 
 `model.onnx` is **not committed**. It is generated locally by the C++ executable.
 The generated graph has no trained weights and no captured customer inputs; it
 uses synthetic LayerNorm parameters (`ones` / `zeros`) and a deterministic random
 input seed (`20260711`).
+
+If you run both repro paths in the same checkout, pass `-RegenerateModel` when
+switching between C++ and Python. They produce the same graph structure, but
+protobuf serialization details can differ.
 
 ## Reproduced environment
 
@@ -91,6 +100,18 @@ Build only:
 .\build.ps1 -Bootstrap
 ```
 
+Run the optional Python version:
+
+```powershell
+.\run-python.ps1 -InstallPythonDeps -RegenerateModel
+```
+
+Run only the Python CPU control:
+
+```powershell
+.\run-python.ps1 -InstallPythonDeps -RegenerateModel -CpuOnly
+```
+
 Override the ONNX Runtime DLL if needed:
 
 ```powershell
@@ -126,6 +147,10 @@ Use an explicit VAIML cache directory:
 5. The first VitisAI inference terminates the process with access violation
    `0xC0000005` (signed exit code `-1073741819`).
 
+The Python path follows the same control flow through `repro.py`: generate model,
+run CPU, create VitisAI session, crash on first VitisAI inference on the affected
+runtime.
+
 ## Generated graph
 
 The generated `model.onnx` contains a `LayerNormalization` followed by the
@@ -138,8 +163,9 @@ Expected generated model properties:
 bytes: about 13 KB
 ```
 
-The C++ runner writes the ONNX protobuf directly. It intentionally avoids Python,
-the `onnx` package, and committed binary model files.
+The C++ runner writes the ONNX protobuf directly. The Python runner builds the
+same graph through `onnx.helper`, which is useful for quick inspection and edits.
+Neither path commits a binary model file.
 
 ORT graph rewrites are deliberately disabled. With normal optimization the
 dynamic shape sequence can be folded or assigned to CPU, which prevents VAIML
