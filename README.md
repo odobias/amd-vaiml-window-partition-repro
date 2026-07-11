@@ -1,9 +1,9 @@
 # AMD VAIML window-partition first-inference crash
 
-Minimal, source-only reproducer for a native crash in AMD's Vitis AI
-Execution Provider (VAIML). The runner generates a tiny synthetic ONNX graph on
-the target machine, verifies its SHA-256, confirms ORT CPU can execute it, then
-runs the same graph through `VitisAIExecutionProvider`.
+Minimal, source-only C++ reproducer for a native crash in AMD's Vitis AI
+Execution Provider (VAIML). The executable generates a tiny synthetic ONNX graph
+on the target machine, confirms ORT CPU can execute it, then runs the same graph
+through `VitisAIExecutionProvider`.
 
 On the affected stack, VAIML compiles the generated graph without errors and
 creates an inference session, then `onnxruntime_vitisai_ep.dll` access-violates
@@ -13,24 +13,24 @@ on the first `Run()`.
 
 This directory is intentionally source-only:
 
-- `bootstrap.ps1` - validates the selected Python/runtime, optionally installs
-  Python graph-generation packages, and can download AMD SDK/driver installers.
+- `bootstrap.ps1` - validates the ONNX Runtime / Ryzen AI runtime paths, fetches
+  the ONNX Runtime C API header if needed, and can download AMD SDK/driver installers.
+- `build.ps1` - builds the C++ repro with CMake or plain Visual Studio `cl.exe`.
 - `run.ps1` - portable Windows runner for a new machine.
-- `repro.py` - generates `model.onnx`, runs CPU control, then runs VitisAI.
-- `requirements.txt` - Python packages needed to generate the ONNX graph.
-- `.gitignore` - ignores the generated `model.onnx` and Python cache files.
+- `src/main.cpp` - writes the minimal ONNX protobuf, runs CPU control, then runs VitisAI.
+- `.gitignore` - ignores generated model/build/download artifacts.
 
-`model.onnx` is **not committed**. It is generated locally by `repro.py` from
-ONNX helper calls. The generated graph has no trained weights and no captured
-customer inputs; it uses synthetic LayerNorm parameters (`ones` / `zeros`) and a
-deterministic random input seed (`20260711`).
+`model.onnx` is **not committed**. It is generated locally by the C++ executable.
+The generated graph has no trained weights and no captured customer inputs; it
+uses synthetic LayerNorm parameters (`ones` / `zeros`) and a deterministic random
+input seed (`20260711`).
 
 ## Reproduced environment
 
 - AMD Ryzen AI 9 HX 370 / XDNA 2 NPU
 - Ryzen AI SDK 1.8.0-beta
 - ONNX Runtime `1.25.1.dev20260617`
-- Python 3.12.11
+- C++ runner built with Visual Studio 2022 Build Tools
 - Windows 11 build 26200
 
 Both a cold compile and a load from the populated VAIML cache reproduce the same
@@ -38,32 +38,31 @@ process crash.
 
 ## Bootstrap on a new machine
 
-The failing provider is AMD-specific. Vanilla `pip install onnxruntime` is **not**
+The failing provider is AMD-specific. A vanilla ONNX Runtime DLL is **not**
 enough and can actively confuse the repro because it does not include
-`VitisAIExecutionProvider`. Use the Ryzen AI SDK Python/runtime.
+`VitisAIExecutionProvider`. Use the Ryzen AI SDK runtime or a Windows ML AMD
+VitisAI EP package.
 
-The bootstrap script validates the selected Python, optionally installs the
-lightweight graph-generation packages (`numpy`, `onnx`), and checks that
-`onnxruntime` exposes `VitisAIExecutionProvider`:
+The bootstrap script validates the selected ONNX Runtime DLL and C API header.
+It downloads `onnxruntime_c_api.h` if needed:
 
 ```powershell
-.\bootstrap.ps1 -InstallPythonDeps
+.\bootstrap.ps1
 ```
 
-Override the SDK Python if needed:
+Override the ONNX Runtime DLL if needed:
 
 ```powershell
 .\bootstrap.ps1 `
-  -Python C:\path\to\ryzen-ai-env\python.exe `
-  -InstallPythonDeps
+  -OrtDll C:\path\to\onnxruntime.dll
 ```
 
-The script tries these Python locations, in order:
+The runner tries these ONNX Runtime DLL locations, in order:
 
-1. `-Python <path>` argument
-2. `$env:RYZEN_AI_PYTHON`
-3. `C:\ProgramData\miniforge3\envs\ryzen-ai-1.8.0-beta\python.exe`
-4. `python` on `PATH`
+1. `-OrtDll <path>` argument
+2. `$env:ORT_DLL`
+3. `C:\ProgramData\miniforge3\envs\ryzen-ai-1.8.0-beta\Lib\site-packages\onnxruntime\capi\onnxruntime.dll`
+4. `C:\Program Files\WindowsApps\WindowsWorkload.WinMLShared.5.0_1.2605.851.0_x64__8wekyb3d8bbwe\onnxruntime.dll`
 
 If the AMD SDK is missing, bootstrap can download the official AMD installer and
 NPU driver archive and verify their SHA-256 hashes:
@@ -83,20 +82,20 @@ bullshit.
 From the repository root:
 
 ```powershell
-.\run.ps1
+.\run.ps1 -Bootstrap -Build -RegenerateModel
 ```
 
-Run bootstrap first, then execute the repro:
+Build only:
 
 ```powershell
-.\run.ps1 -Bootstrap -InstallPythonDeps
+.\build.ps1 -Bootstrap
 ```
 
-Override the SDK Python if needed:
+Override the ONNX Runtime DLL if needed:
 
 ```powershell
 .\run.ps1 `
-  -Python C:\path\to\ryzen-ai-env\python.exe
+  -OrtDll C:\path\to\onnxruntime.dll
 ```
 
 Force model regeneration:
@@ -120,11 +119,11 @@ Use an explicit VAIML cache directory:
 
 ## Expected behavior on the affected stack
 
-1. `repro.py` generates `model.onnx` locally.
+1. `amd_vaiml_repro.exe` generates `model.onnx` locally.
 2. CPU returns a finite tensor with shape `[64, 64, 96]`.
 3. `aiecompiler` prints `Compilation Complete` with `ERROR:0`.
-4. ORT prints `Session created; providers=['VitisAIExecutionProvider', ...]`.
-5. The first VitisAI inference terminates Python with access violation
+4. The C++ runner creates a VitisAI session.
+5. The first VitisAI inference terminates the process with access violation
    `0xC0000005` (signed exit code `-1073741819`).
 
 ## Generated graph
@@ -136,12 +135,11 @@ into 64 windows of `[64,96]`.
 Expected generated model properties:
 
 ```text
-bytes: 12884
-sha256: d4059b6e2f8beb7a2b36ee2217beb0f52d444be034d004906fc34b1b66ea2eac
+bytes: about 13 KB
 ```
 
-`repro.py` checks this hash after generation. If intentional graph edits change
-it, update `GENERATED_MODEL_SHA256` in `repro.py` and this README together.
+The C++ runner writes the ONNX protobuf directly. It intentionally avoids Python,
+the `onnx` package, and committed binary model files.
 
 ORT graph rewrites are deliberately disabled. With normal optimization the
 dynamic shape sequence can be folded or assigned to CPU, which prevents VAIML
