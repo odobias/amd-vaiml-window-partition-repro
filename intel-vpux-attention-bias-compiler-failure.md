@@ -85,13 +85,8 @@ The isolated backbone avoids conflating the two issues.
 
 ## Requested investigation
 
-1. Why does SDPA fusion transform a valid rank-four broadcast into
-   `1x64x64x64 + 16x64x64`?
-2. Is rank information lost while flattening window or head dimensions?
-3. Can the compiler preserve or internally materialize the broadcast?
-4. Why does this produce an LLVM process abort instead of a recoverable
-   compilation error?
-5. Which compiler release contains or is expected to contain a fix?
+Why does SDPA fusion transform a valid rank-four broadcast into
+`1x64x64x64 + 16x64x64`?
 
 ## Attachments needed
 
