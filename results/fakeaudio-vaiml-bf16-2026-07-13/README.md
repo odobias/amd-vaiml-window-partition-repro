@@ -1,32 +1,38 @@
-# FakeAudio BF16 VAIML result (2026-07-13)
+# FakeAudio test with AMD's BF16 VAIML flow
 
-## Verdict
+Tested on 2026-07-13.
 
-AMD's `compile_npu.py` and `vitisai_config.json` do not place the current
-FakeAudio benchmark model on the NPU in the reproduced environment.
+## Short version
 
-VAIML fails to compile the main partition with a flexible L1 buffer-placement
-error at layer 224. It then rejects the remaining small partition because it is
-below the 2% GOP threshold. ONNX Runtime still creates a session, but every
-profiled inference node executes on the CPU.
+We tried AMD's `compile_npu.py` and `vitisai_config.json` on the current,
+unmodified FakeAudio model.
 
-The absence of an inference crash is therefore not evidence that this model
-runs successfully on the NPU.
+The model runs without crashing, but it does **not** run on the NPU:
 
-## Environment
+- VAIML fails to compile the main partition at layer 224.
+- The only other partition is too small to be accepted.
+- ONNX Runtime silently runs the complete model on the CPU.
+- Profiling confirms **0 NPU nodes, 512 CPU nodes, and 100% CPU offload**.
 
-- AMD Ryzen AI 9 HX 370 / XDNA 2 NPU
+The helper still prints `Compilation Successful` because it checks whether an
+ONNX Runtime session was created, not whether VAIML successfully placed any work
+on the NPU.
+
+## What we tested
+
+We used:
+
+- AMD Ryzen AI 9 HX 370 with an XDNA 2 NPU
 - Ryzen AI SDK 1.8.0-beta
 - ONNX Runtime 1.25.1
 - Windows 11 build 26200
-- Original FP32 FakeAudio ONNX, opset 17
-- AMD-provided BF16 configuration, optimization level 3, Peano compiler
-- No ONNX graph optimization or opset conversion before compilation
+- the original FP32 FakeAudio model, opset 17
+- AMD's BF16 config with optimization level 3 and the Peano compiler
 
-## Procedure
+We did not optimize, convert, or otherwise modify the ONNX model before the
+test.
 
-First, the unmodified FakeAudio ONNX was passed to AMD's helper with a fresh
-cache:
+First, we ran AMD's helper with an empty cache:
 
 ```powershell
 python amd\compile_npu.py <fakeaudio-model.onnx> `
@@ -34,14 +40,14 @@ python amd\compile_npu.py <fakeaudio-model.onnx> `
   --cache-dir <fresh-cache>
 ```
 
-The same model and AMD configuration were then run through
-`NpuInferenceBench`, built against the Ryzen AI ONNX Runtime. The benchmark used
-five labeled fixture inputs, compared probabilities with the CPU reference,
-and enabled ONNX Runtime profiling to audit actual node assignment.
+We then ran the same model and configuration through `NpuInferenceBench`. This
+second run used five labeled audio fixtures, compared the output with the CPU
+reference, and enabled ONNX Runtime profiling so we could see where every node
+actually executed.
 
-## Compilation failure
+## What failed
 
-The compiler reports:
+VAIML cannot place the buffers for layer 224:
 
 ```text
 WARNING: [VAIML-BE-SKGEN 11007] 224 of layer L-224 : Failed to place the buffers.
@@ -53,25 +59,27 @@ INFO: [VAIP-VAIML-PASS] Subgraph vaiml_par_0 GOPs% (0.956%) is less than the thr
 DEBUG2: [VAIP-VAIML-PASS] Total subgraphs: 0
 ```
 
-The VAIP summary consequently assigns all 598 pre-optimization operators to
-CPU. Cache generation also reports:
+After that failure, VAIML falls back to CPU for the main partition. It also
+rejects the remaining partition because it represents only 0.956% of the
+model's work, below the 2% threshold. The final compiler summary shows zero NPU
+subgraphs and all 598 pre-optimization operators assigned to CPU.
 
-```text
-Model signature file does not exist: <cache>/original-model-signature.txt
-```
+## Why the helper reports success
 
-Despite those errors, `compile_npu.py` prints:
+Despite the compiler errors, `compile_npu.py` ends with:
 
 ```text
 === Compilation Successful ===
 ```
 
-That message is not a compiler-success signal. The helper prints it
-unconditionally after `ort.InferenceSession(...)` returns. Session creation can
-succeed after VitisAI rejects every NPU partition because ONNX Runtime retains
-CPU execution.
+That message means only that `ort.InferenceSession(...)` returned successfully.
+ONNX Runtime can create a valid session after VitisAI rejects every NPU
+partition because the CPU provider remains available.
 
-## Profiled benchmark result
+In other words, the provider loaded successfully, but it did not execute the
+model.
+
+## What profiling showed
 
 | Measurement | Result |
 | --- | ---: |
@@ -84,35 +92,31 @@ CPU execution.
 | Maximum probability difference from CPU | 0.000000 |
 | Fixture accuracy | 3/5 (60%) |
 
-The 512-node count is from the optimized runtime graph, while the compiler's
-598-operator count is from the earlier graph representation.
+The compiler reports 598 operators before ONNX Runtime graph optimization; the
+runtime profile reports 512 nodes afterward. The counts differ because they
+refer to different graph stages, not because any nodes moved to the NPU.
 
-`VitisAIExecutionProvider` appears as the resolved provider and provider setup
-returns success. This only proves that the EP loaded; it does not prove that it
-claimed any graph nodes. The profile is decisive: `ep_nodes=0`,
-`cpu_nodes=512`, and `cpu_offload_pct=100`.
+The model's 60% fixture accuracy and probabilities exactly match the CPU
+reference. That confirms the CPU fallback is numerically consistent, but it
+does not demonstrate NPU correctness. The reported 113 ms latency is also
+CPU-only and should not be treated as NPU performance.
 
-The 60% fixture accuracy is identical to the CPU reference and is not attributed
-to VAIML. Likewise, the reported latency is CPU-only and must not be presented
-as NPU performance.
+## Full logs
 
-## Attached logs
+- [`compile.log`](compile.log) contains the complete output from AMD's helper
+  using a fresh cache.
+- [`benchmark.log`](benchmark.log) contains the benchmark's cold and hot session
+  loads, VAIML output, profiling results, and final JSON result.
 
-- [`compile.log`](compile.log) — complete output from AMD's helper on a fresh
-  cache.
-- [`benchmark.log`](benchmark.log) — complete VAIML output plus the final
-  structured benchmark result and node-assignment audit.
+The files overlap because both runs invoke the same VAIML compiler. They are
+kept separately because `compile.log` captures the behavior of AMD's helper,
+while `benchmark.log` adds independent node-assignment and correctness checks.
 
-The key compile failure is near the end of each log. The final JSON object in
-`benchmark.log` contains the exact metrics, per-sample outputs, and CPU operator
-counts.
+## Questions for AMD
 
-## Requested follow-up
-
-1. Investigate the flexible L1 placement failure for `L-224`.
-2. Determine whether this partition needs a different tiling, spill, or
-   partition boundary strategy for XDNA 2.
-3. Make `compile_npu.py` distinguish session creation from successful NPU
-   compilation.
-4. Report claimed NPU nodes (or fail when there are none) so CPU-only execution
-   cannot be mistaken for a successful compile.
+1. Why does buffer placement fail for `L-224`, and can a different tiling,
+   spilling, or partition boundary make it fit on XDNA 2?
+2. Should `compile_npu.py` report failure when VAIML compilation fails or when
+   the resulting session contains no NPU nodes?
+3. Can the helper expose node assignment so a CPU-only session is not mistaken
+   for a successful NPU compile?
