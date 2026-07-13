@@ -32,6 +32,18 @@ We used:
 We did not optimize, convert, or otherwise modify the ONNX model before the
 test.
 
+### Public model artifact
+
+The exact model used for this test is publicly available from
+[Hugging Face](https://huggingface.co/odobias/fakeaudio-onnx-vaiml-repro):
+
+- [Download `model.onnx`](https://huggingface.co/odobias/fakeaudio-onnx-vaiml-repro/resolve/main/model.onnx?download=true)
+- Size: 127,844,774 bytes
+- SHA-256: `d4b2dde8f4f95862ecb9f5e90821d853adea3774e7c48857f60ee6084d5e85c6`
+
+The Hugging Face model card also records the artifact metadata and a download
+command. Verify the hash before running the reproduction.
+
 First, we ran AMD's helper with an empty cache:
 
 ```powershell
