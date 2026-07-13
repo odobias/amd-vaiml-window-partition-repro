@@ -206,3 +206,16 @@ and deviceBatchSize=1
 That larger graph contains model-derived structure and is not required for this
 report. This directory is the clean vendor-facing reproducer: tiny, synthetic,
 deterministic, source-only, and free of proprietary tensors.
+
+## Related Intel VPUX compiler failure
+
+The same FakeAudio/HTSAT investigation exposed a separate Intel NPU compiler
+failure in windowed attention. Intel's VPUX SDPA fusion turns a valid broadcast
+attention-bias addition into incompatible operand shapes and terminates with an
+LLVM abort. Explicitly materializing the broadcast with `Expand` makes the
+backbone compile without changing its numerical results.
+
+See [Intel VPUX compiler abort on broadcast attention bias](intel-vpux-attention-bias-compiler-failure.md).
+This is not an AMD VAIML failure; it is colocated here so the vendor reports
+derived from the same cross-vendor model investigation remain publicly
+accessible from one repository.
